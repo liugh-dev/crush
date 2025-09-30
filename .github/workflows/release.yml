@@ -1,35 +1,105 @@
-# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
-
-name: goreleaser
+name: Release
 
 on:
   push:
     tags:
-      - v*.*.*
+      - "v*"
 
-concurrency:
-  group: goreleaser
-  cancel-in-progress: true
+permissions:
+  contents: write
 
 jobs:
-  goreleaser:
-    uses: charmbracelet/meta/.github/workflows/goreleaser.yml@main
-    with:
-      go_version: "1.25"
-      macos_sign_entitlements: "./.github/entitlements.plist"
-    secrets:
-      docker_username: ${{ secrets.DOCKERHUB_USERNAME }}
-      docker_token: ${{ secrets.DOCKERHUB_TOKEN }}
-      gh_pat: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-      goreleaser_key: ${{ secrets.GORELEASER_KEY }}
-      fury_token: ${{ secrets.FURY_TOKEN }}
-      nfpm_gpg_key: ${{ secrets.NFPM_GPG_KEY }}
-      nfpm_passphrase: ${{ secrets.NFPM_PASSPHRASE }}
-      npm_token: ${{ secrets.NPM_TOKEN }}
-      snapcraft_token: ${{ secrets.SNAPCRAFT_TOKEN }}
-      aur_key: ${{ secrets.AUR_KEY }}
-      macos_sign_p12: ${{ secrets.MACOS_SIGN_P12 }}
-      macos_sign_password: ${{ secrets.MACOS_SIGN_PASSWORD }}
-      macos_notary_issuer_id: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
-      macos_notary_key_id: ${{ secrets.MACOS_NOTARY_KEY_ID }}
-      macos_notary_key: ${{ secrets.MACOS_NOTARY_KEY }}
+  build:
+    name: Build binaries
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Build
+        shell: bash
+        run: |
+          mkdir -p dist
+          VERSION=${GITHUB_REF_NAME}
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -o dist/crush-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }} .
+
+      - name: Package
+        shell: bash
+        run: |
+          cd dist
+          VERSION=${{ github.ref_name }}
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            mv crush-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }} crush-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.exe
+            powershell Compress-Archive -Path crush-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.exe -DestinationPath crush-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.zip
+            rm crush-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.exe
+          else
+            tar czf crush-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz crush-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}
+            rm crush-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+
+  release:
+    name: Create GitHub Release with Changelog
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate changelog
+        shell: bash
+        id: changelog
+        run: |
+          TAG=${GITHUB_REF_NAME}
+          PREV_TAG=$(git tag --sort=-creatordate | grep -B1 "$TAG" | head -n1)
+          if [ -z "$PREV_TAG" ]; then
+            git log --oneline > changelog.txt
+          else
+            git log $PREV_TAG..$TAG --oneline > changelog.txt
+          fi
+          cat changelog.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: changelog.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
