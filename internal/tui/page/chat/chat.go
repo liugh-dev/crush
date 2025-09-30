@@ -29,6 +29,7 @@ import (
 	"github.com/charmbracelet/crush/internal/tui/components/core/layout"
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs"
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs/commands"
+	"github.com/charmbracelet/crush/internal/tui/components/dialogs/compact"
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs/filepicker"
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs/models"
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs/reasoning"
@@ -749,6 +750,29 @@ func (p *chatPage) sendMessage(text string, attachments []message.Attachment) te
 	if p.app.CoderAgent == nil {
 		return util.ReportError(fmt.Errorf("coder agent is not initialized"))
 	}
+
+	model := p.app.CoderAgent.Model()
+	historicalTokens := session.PromptTokens + session.CompletionTokens
+	estimatedNewTokens := len([]rune(text)) / 2
+
+	cfg := config.Get()
+	agentCfg := cfg.Agents["coder"]
+	modelConfig := cfg.Models[agentCfg.Model]
+	maxTokens := model.DefaultMaxTokens
+	if modelConfig.MaxTokens > 0 {
+		maxTokens = modelConfig.MaxTokens
+	}
+
+	if historicalTokens+int64(estimatedNewTokens)+maxTokens > model.ContextWindow {
+		if !cfg.Options.DisableAutoSummarize {
+			return util.CmdHandler(dialogs.OpenDialogMsg{
+				Model: compact.NewCompactDialogCmp(p.app.CoderAgent, session.ID, false),
+			})
+		} else {
+			return util.ReportWarn("Context window would be exceeded, please summarize the session manually")
+		}
+	}
+
 	_, err := p.app.CoderAgent.Run(context.Background(), session.ID, text, attachments...)
 	if err != nil {
 		return util.ReportError(err)
